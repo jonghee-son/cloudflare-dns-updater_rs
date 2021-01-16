@@ -7,6 +7,8 @@ description = "A cloudflare dns updater script written in rust"
 license = "MIT OR Apache_2.0"
 homepage = "https://github.com/paper1020/cloudflare-dns-updater_rs"
 repository = "https://github.com/paper1020/cloudflare-dns-updater_rs"
+keywords = ["cli", "dns"]
+categories = ["commend-line-utilities"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
