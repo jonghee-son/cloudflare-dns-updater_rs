@@ -1,0 +1,19 @@
+[package]
+name = "cloudflare-dns-updater_rs"
+version = "0.1.0"
+authors = ["jhson <zzongaone@gmail.com>"]
+edition = "2018"
+description = "A cloudflare dns updater script written in rust"
+license = "MIT OR Apache_2.0"
+homepage = "https://github.com/paper1020/cloudflare-dns-updater_rs"
+repository = "https://github.com/paper1020/cloudflare-dns-updater_rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+
+curl = "0.4.34"
+serde = "*"
+serde_json = "*"
+serde_derive = "*"
+ajson = "0.2"
