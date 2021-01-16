@@ -91,7 +91,7 @@ fn main() {
         let dns_record_id = String::from_utf8_lossy(&dnsrecordidraw);
         let dip = ajson::get(&dns_record_id, r#"result.0.content"#).unwrap();
         let pip = dip.as_str().trim();
-        //captures current ip address from https://ipv4.icanhazip.com
+        //captures current ip address from https://checkip.amazonaws.com
         //into a local vector "cip"
         //Current ip setting
         let mut cip = Vec::new();
