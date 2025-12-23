@@ -1,278 +1,228 @@
-extern crate curl;
-extern crate serde_derive;
-extern crate serde;
-extern crate serde_json;
-extern crate ajson;
+use std::{io::Read, thread, time::Duration};
 
-use curl::easy::{Easy, List};
-use std::time::Duration;
-use std::thread;
-use std::io::Read;
-use serde_derive::{Serialize, Deserialize};
+use anyhow::{Context, Result, anyhow};
+use curl::easy::{Easy, List, ReadError};
+use dotenvy::dotenv;
+use serde::{Deserialize, Serialize};
 
-fn main() {
-    //Required variables for updating DNS Record
-    //change variables here to use this script
-    //Account Email
-    let login_email = "Your Cloudflare account email";
-    //API Token
-    //take extra care to keep this variable secret
-    let global_api_key = "Your Cloudflare Global API Key";
-    //Domain to change DNS Record
-    let domain = "yourdomain.tld";
-    
-    loop {
-        //Zone_id
-        let mut url = String::from("https://api.cloudflare.com/client/v4/zones?name=");
-        url.push_str(&domain);
-        url.push_str("&status=active");
+const UPDATE_INTERVAL: Duration = Duration::from_secs(600);
 
-        //defining header
-        let mut x_auth_email = String::from("X-Auth-Email: ");
-        x_auth_email.push_str(&login_email);
+#[derive(Clone)]
+struct Credentials {
+    email: String,
+    api_key: String,
+    domain: String,
+}
 
-        let mut x_auth_key = String::from("X-Auth-Key: ");
-        x_auth_key.push_str(&global_api_key);
+impl Credentials {
+    fn from_env() -> Result<Self> {
+        let email = std::env::var("CLOUDFLARE_EMAIL")
+            .context("Set CLOUDFLARE_EMAIL to your Cloudflare account email")?;
+        let api_key = std::env::var("CLOUDFLARE_API_KEY")
+            .context("Set CLOUDFLARE_API_KEY to your Cloudflare API key")?;
+        let domain = std::env::var("CLOUDFLARE_DOMAIN")
+            .context("Set CLOUDFLARE_DOMAIN to the zone you want to update")?;
 
-        let content_type = String::from("Content-Type: application/json");
-
-        let mut list1 = List::new();
-        list1.append(&x_auth_email).unwrap();
-        list1.append(&x_auth_key).unwrap();
-        list1.append(&content_type).unwrap();
-        
-        //uses HTTPGET method to get Zone_id
-        let mut zoneidraw = Vec::new();
-        let mut url1 = Easy::new();
-        url1.url(&url).unwrap();
-        url1.get(true).unwrap();
-        url1.http_headers(list1).unwrap();
-        
-        {
-            let mut transfer = url1.transfer();
-            transfer.write_function(|data| {
-                zoneidraw.extend_from_slice(data);
-                Ok(data.len())
-            }).unwrap();
-            transfer.perform().unwrap()
-        }
-        
-        let zone_id = String::from_utf8_lossy(&zoneidraw);
-        //ajson to parse zone_id from result
-        let zid = ajson::get(&zone_id,r#"result.0.id"#).unwrap();
-        //println!("Zone_id is {}", zid.as_str().trim());
-        
-        //DNS_Record_id
-        let mut url0 = String::from("https://api.cloudflare.com/client/v4/zones/");
-        url0.push_str(&zid.as_str().trim());
-        url0.push_str("/dns_records?type=A&name=");
-        url0.push_str(&domain);
-
-        let mut list2 = List::new();
-        list2.append(&x_auth_email).unwrap();
-        list2.append(&x_auth_key).unwrap();
-        list2.append(&content_type).unwrap();
-        
-        let mut dnsrecordidraw = Vec::new();
-        let mut url2 = Easy::new();
-        url2.url(&url0).unwrap();
-        url2.get(true).unwrap();
-        url2.http_headers(list2).unwrap();
-        
-        {
-            let mut transfer = url2.transfer();
-            transfer.write_function(|data| {
-                dnsrecordidraw.extend_from_slice(data);
-                Ok(data.len())
-            }).unwrap();
-            transfer.perform().unwrap()
-        }
-        
-        let dns_record_id = String::from_utf8_lossy(&dnsrecordidraw);
-        let dip = ajson::get(&dns_record_id, r#"result.0.content"#).unwrap();
-        let pip = dip.as_str().trim();
-        //captures current ip address from https://checkip.amazonaws.com
-        //into a local vector "cip"
-        //Current ip setting
-        let mut cip = Vec::new();
-        let mut handle = Easy::new();
-        handle.url("https://checkip.amazonaws.com").unwrap();
-        {
-            let mut transfer = handle.transfer();
-            transfer.write_function(|data| {
-                cip.extend_from_slice(data);
-                Ok(data.len())
-            }).unwrap();
-            transfer.perform().unwrap();
-        }
-
-        let ip1 = String::from_utf8_lossy(&cip);
-        println!("Current IP address is {:?}", &ip1.trim());
-        println!("Record IP address is {}", &pip);
-
-        //if current ip is diffrent with past ip updates DNS Record
-        if &ip1.trim() == &pip {
-            println!("There's no need to update");
-        } else if &ip1.trim() != &pip {
-            println!("Updating DNS Record");
-            update_record(&login_email, &global_api_key, &domain);
-        }
-
-        //Updating A_Record in every 10 minutes
-        thread::sleep(Duration::from_secs(600));
+        Ok(Self {
+            email,
+            api_key,
+            domain,
+        })
     }
 }
 
-fn update_record(login_email: &str, global_api_key: &str, domain: &str) {
-    //Fetching current server ip address
-    let mut ip = Vec::new();
+#[derive(Deserialize)]
+struct ZoneResponse {
+    result: Vec<Zone>,
+}
+
+#[derive(Deserialize)]
+struct Zone {
+    id: String,
+}
+
+#[derive(Deserialize, Clone)]
+struct DnsRecord {
+    id: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct RecordResponse {
+    result: Vec<DnsRecord>,
+}
+
+#[derive(Serialize)]
+struct UpdatePayload {
+    #[serde(rename = "type")]
+    kind: String,
+    name: String,
+    content: String,
+    ttl: u32,
+    proxied: bool,
+}
+
+#[derive(Deserialize)]
+struct UpdateResponse {
+    success: bool,
+}
+
+fn main() -> Result<()> {
+    dotenv().ok();
+    let creds = Credentials::from_env()?;
+
+    loop {
+        sync_dns(&creds)?;
+        thread::sleep(UPDATE_INTERVAL);
+    }
+}
+
+fn sync_dns(creds: &Credentials) -> Result<()> {
+    let zone_id = fetch_zone_id(creds)?;
+    let record = fetch_record(&zone_id, creds)?;
+    let current_ip = fetch_public_ip()?;
+
+    if record.content.trim() == current_ip {
+        println!("No update required. IP: {}", current_ip);
+        return Ok(());
+    }
+
+    println!(
+        "Updating DNS from {} to {} for {}",
+        record.content.trim(),
+        current_ip,
+        creds.domain
+    );
+
+    update_record(&zone_id, &record.id, &current_ip, creds)?;
+    println!("DNS record updated.");
+    Ok(())
+}
+
+fn fetch_zone_id(creds: &Credentials) -> Result<String> {
+    let url = format!(
+        "https://api.cloudflare.com/client/v4/zones?name={}&status=active",
+        creds.domain
+    );
+
+    let body = perform_get(&url, auth_headers(creds)?)?;
+    let parsed: ZoneResponse =
+        serde_json::from_slice(&body).context("Failed to parse zone lookup response")?;
+
+    parsed
+        .result
+        .first()
+        .map(|z| z.id.clone())
+        .ok_or_else(|| anyhow!("Zone not found for domain {}", creds.domain))
+}
+
+fn fetch_record(zone_id: &str, creds: &Credentials) -> Result<DnsRecord> {
+    let url = format!(
+        "https://api.cloudflare.com/client/v4/zones/{}/dns_records?type=A&name={}",
+        zone_id, creds.domain
+    );
+
+    let body = perform_get(&url, auth_headers(creds)?)?;
+    let parsed: RecordResponse =
+        serde_json::from_slice(&body).context("Failed to parse DNS record response")?;
+
+    parsed
+        .result
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("A record not found for domain {}", creds.domain))
+}
+
+fn fetch_public_ip() -> Result<String> {
+    let mut response = Vec::new();
     let mut handle = Easy::new();
-    handle.url("https://checkip.amazonaws.com").unwrap();
+    handle.url("https://checkip.amazonaws.com")?;
+
     {
         let mut transfer = handle.transfer();
         transfer.write_function(|data| {
-            ip.extend_from_slice(data);
+            response.extend_from_slice(data);
             Ok(data.len())
-        }).unwrap();
-        transfer.perform().unwrap();
+        })?;
+        transfer.perform()?;
     }
 
-    let current_ip = String::from_utf8_lossy(&ip);
+    let ip = String::from_utf8(response)?;
+    Ok(ip.trim().to_string())
+}
 
-    //data = {"type":"A","name":"user-domain","content":"ip-address","ttl":"1","proxied":false};
-    //name
-    let mut n = String::new();
-    n.push_str(&domain);
-    //content
-    let mut c = String::new();
-    c.push_str(&current_ip.trim());
-
-    //makes data format then converts it into u8
-    #[derive(Serialize,Deserialize)]
-    struct Data {
-        r#type: String,
-        name: String,
-        content: String,
-        ttl: u8,
-        proxied: bool
-    }
-
-    let data = Data {
-        r#type: String::from("A"), 
-        name: n, 
-        content: c, 
-        ttl: 1, 
-        proxied: false
+fn update_record(zone_id: &str, record_id: &str, ip: &str, creds: &Credentials) -> Result<()> {
+    let payload = UpdatePayload {
+        kind: "A".to_string(),
+        name: creds.domain.clone(),
+        content: ip.to_string(),
+        ttl: 1,
+        proxied: false,
     };
-    let serialized_data = serde_json::to_string(&data).unwrap();
-    //println!("JSON data is {}", serialized_data);
 
-    let data_to_upload = &mut serialized_data.as_bytes();
+    let body = serde_json::to_vec(&payload)?;
+    let mut body_reader = body.as_slice();
+    let mut response = Vec::new();
 
-    //defining header
-    let mut x_auth_email = String::from("X-Auth-Email: ");
-    x_auth_email.push_str(&login_email);
+    let url = format!(
+        "https://api.cloudflare.com/client/v4/zones/{}/dns_records/{}",
+        zone_id, record_id
+    );
 
-    let mut x_auth_key = String::from("X-Auth-Key: ");
-    x_auth_key.push_str(&global_api_key);
+    let mut handle = Easy::new();
+    handle.url(&url)?;
+    handle.put(true)?;
+    handle.http_headers(auth_headers(creds)?)?;
+    handle.upload(true)?;
+    handle.in_filesize(body.len() as u64)?;
 
-    let content_type = String::from("Content-Type: application/json");
+    {
+        let mut transfer = handle.transfer();
+        // Map std::io::Error into curl's ReadError so the upload can abort cleanly.
+        transfer.read_function(|into| body_reader.read(into).map_err(|_| ReadError::Abort))?;
+        transfer.write_function(|data| {
+            response.extend_from_slice(data);
+            Ok(data.len())
+        })?;
+        transfer.perform()?;
+    }
 
-    //header list
+    let update: UpdateResponse =
+        serde_json::from_slice(&response).context("Failed to parse update response")?;
+
+    if update.success {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "Cloudflare API reported failure: {}",
+            String::from_utf8_lossy(&response)
+        ))
+    }
+}
+
+fn perform_get(url: &str, headers: List) -> Result<Vec<u8>> {
+    let mut data = Vec::new();
+    let mut handle = Easy::new();
+    handle.url(url)?;
+    handle.http_headers(headers)?;
+    handle.get(true)?;
+
+    {
+        let mut transfer = handle.transfer();
+        transfer.write_function(|chunk| {
+            data.extend_from_slice(chunk);
+            Ok(chunk.len())
+        })?;
+        transfer.perform()?;
+    }
+
+    Ok(data)
+}
+
+fn auth_headers(creds: &Credentials) -> Result<List> {
     let mut list = List::new();
-    list.append(&x_auth_email).unwrap();
-    list.append(&x_auth_key).unwrap();
-    list.append(&content_type).unwrap();
-    
-    //Zone_id
-    let mut url = String::from("https://api.cloudflare.com/client/v4/zones?name=");
-    url.push_str(&domain);
-    url.push_str("&status=active");
-
-    let mut list1 = List::new();
-    list1.append(&x_auth_email).unwrap();
-    list1.append(&x_auth_key).unwrap();
-    list1.append(&content_type).unwrap();
-    
-    //uses HTTPGET method to get Zone_id
-    let mut zoneidraw = Vec::new();
-    let mut url1 = Easy::new();
-    url1.url(&url).unwrap();
-    url1.get(true).unwrap();
-    url1.http_headers(list1).unwrap();
-    
-    {
-        let mut transfer = url1.transfer();
-        transfer.write_function(|data| {
-            zoneidraw.extend_from_slice(data);
-            Ok(data.len())
-        }).unwrap();
-        transfer.perform().unwrap()
-    }
-    
-    let zone_id = String::from_utf8_lossy(&zoneidraw);
-    //ajson to parse zone_id from result
-    let zid = ajson::get(&zone_id,r#"result.0.id"#).unwrap();
-    println!("Zone_id is {}", zid.as_str().trim());
-    
-    //DNS_Record_id
-    let mut url0 = String::from("https://api.cloudflare.com/client/v4/zones/");
-    url0.push_str(&zid.as_str().trim());
-    url0.push_str("/dns_records?type=A&name=");
-    url0.push_str(&domain);
-
-    let mut list2 = List::new();
-    list2.append(&x_auth_email).unwrap();
-    list2.append(&x_auth_key).unwrap();
-    list2.append(&content_type).unwrap();
-    
-    let mut dnsrecordidraw = Vec::new();
-    let mut url2 = Easy::new();
-    url2.url(&url0).unwrap();
-    url2.get(true).unwrap();
-    url2.http_headers(list2).unwrap();
-    
-    {
-        let mut transfer = url2.transfer();
-        transfer.write_function(|data| {
-            dnsrecordidraw.extend_from_slice(data);
-            Ok(data.len())
-        }).unwrap();
-        transfer.perform().unwrap()
-    }
-    
-    let dns_record_id = String::from_utf8_lossy(&dnsrecordidraw);
-    let did = ajson::get(&dns_record_id, r#"result.0.id"#).unwrap();
-    
-    println!("DNS_Record_id is {}", &did.as_str().trim());
-
-    //Using cURL PUT to send required header&data to update DNS Record
-    let mut api_url = String::from("https://api.cloudflare.com/client/v4/zones/");
-    api_url.push_str(&zid.as_str().trim());
-    api_url.push_str("/dns_records/");
-    api_url.push_str(&did.as_str().trim());
-
-    let mut res = Vec::new();
-    let mut api = Easy::new();
-    api.url(&api_url).unwrap();
-    api.put(true).unwrap();
-    api.http_headers(list).unwrap();
-    api.upload(true).unwrap();
-    api.in_filesize(data_to_upload.len() as u64).unwrap();
-
-    {
-        let mut transfer = api.transfer();
-        transfer.read_function(|into| {
-            Ok(data_to_upload.read(into).unwrap())
-        }).unwrap();
-        transfer.write_function(|data| {
-            res.extend_from_slice(data);
-            Ok(data.len())
-        }).unwrap();
-        transfer.perform().unwrap();
-    }
-
-    let result_json = String::from_utf8_lossy(&res);
-    let result_done = ajson::get(&result_json, "success").unwrap();
-    println!("Result is {}", &result_done.as_str());
+    list.append(&format!("X-Auth-Email: {}", creds.email))?;
+    list.append(&format!("X-Auth-Key: {}", creds.api_key))?;
+    list.append("Content-Type: application/json")?;
+    Ok(list)
 }
