@@ -12,18 +12,10 @@ categories = ["commend-line-utilities"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[features]
-# If compiling on a system without OpenSSL installed, or cross-compiling for a different
-# architecture, enable this feature to compile OpenSSL as part of the build.
-# See https://docs.rs/openssl/#vendored for more.
-static_ssl = ['openssl/vendored']
-
 [dependencies]
 anyhow = "1.0"
 curl = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 dotenvy = "0.15"
-[dependencies.openssl]
-optional = true
-version = "0.10"
+openssl = { version = "0.10", features = ["vendored"] }
